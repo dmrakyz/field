@@ -10,8 +10,29 @@ const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '
 
 let stats = {};
 try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { }
+// ---- persistence: free Upstash Redis (survives Render restarts). Without the env vars → local file only.
+const UP_URL = process.env.UPSTASH_REDIS_REST_URL, UP_TOK = process.env.UPSTASH_REDIS_REST_TOKEN, KEY = 'huajian_state';
 let saveT = null;
-const saveStats = () => { clearTimeout(saveT); saveT = setTimeout(() => fs.writeFile(STATS_FILE, JSON.stringify(stats), () => { }), 2000); };
+const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets) });
+const saveAll = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
+  const body = snapshot();
+  fs.writeFile(STATS_FILE, JSON.stringify(stats), () => { });
+  if (UP_URL) { try { await fetch(UP_URL + '/set/' + KEY, { method: 'POST', headers: { Authorization: 'Bearer ' + UP_TOK }, body }); } catch (e) { console.log('save failed', e.message); } }
+}, 2500); };
+const saveStats = saveAll;
+async function loadAll() {
+  if (!UP_URL) return;
+  try {
+    const r = await fetch(UP_URL + '/get/' + KEY, { headers: { Authorization: 'Bearer ' + UP_TOK } }); const j = await r.json();
+    if (!j.result) return; const d = JSON.parse(j.result);
+    stats = d.stats || {};
+    for (const [k, v] of Object.entries(d.clocks || {})) clocks.set(k, v);
+    for (const [k, v] of Object.entries(d.chats || {})) chats.set(k, v);
+    for (const [k, v] of Object.entries(d.lanterns || {})) lanterns.set(k, v);
+    for (const [k, v] of Object.entries(d.blankets || {})) blankets.set(k, v);
+    console.log('restored garden from Upstash');
+  } catch (e) { console.log('load failed', e.message); }
+}
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -61,17 +82,17 @@ wss.on('connection', ws => {
     }
     if (m.t === 'ping') return send(ws, { t: 'pong', c: m.c, s: Date.now() });
     if (!ws.room) return;
-    if (m.t === 'clock') { const c = { h0: ((+m.h % 24) + 24) % 24, t0: Date.now(), dayMs: DAY_MS }; clocks.set(ws.room, c); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'clock', clock: c }); return; }
+    if (m.t === 'clock') { const c = { h0: ((+m.h % 24) + 24) % 24, t0: Date.now(), dayMs: DAY_MS }; clocks.set(ws.room, c); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'clock', clock: c }); return; }
     if (m.t === 'lantern' && m.l) {
       const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() };
-      const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a);
+      const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a); saveAll();
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
     }
-    if (m.t === 'blanket') { const b = m.b ? { x: +m.b.x, y: +m.b.y, z: +m.b.z, yaw: +m.b.yaw, who: String(m.b.who || '') } : null; blankets.set(ws.room, b); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'blanket', b }); return; }
+    if (m.t === 'blanket') { const b = m.b ? { x: +m.b.x, y: +m.b.y, z: +m.b.z, yaw: +m.b.yaw, who: String(m.b.who || '') } : null; blankets.set(ws.room, b); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'blanket', b }); return; }
     if (m.t === 'chat') {
       const msg = { t: 'chat', id: ws.id, name: ws.name, who: ws.who, txt: String(m.txt || '').slice(0, 300), at: Date.now() };
       if (!msg.txt.trim()) return;
-      const h = chats.get(ws.room) || []; h.push(msg); while (h.length > 50) h.shift(); chats.set(ws.room, h);
+      const h = chats.get(ws.room) || []; h.push(msg); while (h.length > 50) h.shift(); chats.set(ws.room, h); saveAll();
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, msg); return;
     }
     if (m.t === 'state') { ws.last = m; m.id = ws.id; return others(ws, m); }
@@ -86,4 +107,4 @@ wss.on('connection', ws => {
   });
 });
 setInterval(() => { for (const ws of wss.clients) { if (!ws.alive) { ws.terminate(); continue; } ws.alive = false; ws.ping(); } }, 25000);
-server.listen(PORT, () => console.log('花间 listening on', PORT));
+loadAll().finally(() => server.listen(PORT, () => console.log('花间 listening on', PORT, UP_URL ? '(saving to Upstash)' : '(no Upstash: memory only)')));
