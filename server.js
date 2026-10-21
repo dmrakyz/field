@@ -37,6 +37,8 @@ const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
 const rooms = new Map(); // room -> Set<ws>
 const clocks = new Map(); // room -> { h0, t0 }  official time of day
 const chats = new Map();  // room -> last 50 messages
+const lanterns = new Map(); // room -> lanterns in the sky (kept up to 200)
+const blankets = new Map(); // room -> picnic blanket or null
 const DAY_MS = 12 * 60 * 1000;
 const clockOf = room => { if (!clocks.has(room)) clocks.set(room, { h0: 18.85, t0: Date.now(), dayMs: DAY_MS }); return clocks.get(room); };
 const send = (ws, m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
@@ -52,7 +54,7 @@ wss.on('connection', ws => {
       ws.room = String(m.room || 'garden').slice(0, 40); ws.name = String(m.name || '?').slice(0, 30); ws.who = m.who;
       if (!rooms.has(ws.room)) rooms.set(ws.room, new Set());
       const r = rooms.get(ws.room); r.add(ws);
-      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
+      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
       if (r.size === 1) ws.host = true;
       others(ws, { t: 'join', id: ws.id, name: ws.name, who: ws.who });
       return;
@@ -60,6 +62,12 @@ wss.on('connection', ws => {
     if (m.t === 'ping') return send(ws, { t: 'pong', c: m.c, s: Date.now() });
     if (!ws.room) return;
     if (m.t === 'clock') { const c = { h0: ((+m.h % 24) + 24) % 24, t0: Date.now(), dayMs: DAY_MS }; clocks.set(ws.room, c); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'clock', clock: c }); return; }
+    if (m.t === 'lantern' && m.l) {
+      const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() };
+      const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a);
+      const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
+    }
+    if (m.t === 'blanket') { const b = m.b ? { x: +m.b.x, y: +m.b.y, z: +m.b.z, yaw: +m.b.yaw, who: String(m.b.who || '') } : null; blankets.set(ws.room, b); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'blanket', b }); return; }
     if (m.t === 'chat') {
       const msg = { t: 'chat', id: ws.id, name: ws.name, who: ws.who, txt: String(m.txt || '').slice(0, 300), at: Date.now() };
       if (!msg.txt.trim()) return;
