@@ -56,6 +56,10 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=31536000, immutable' }); res.end(Buffer.from(d.split(',')[1], 'base64'));
     })(); return;
   }
+  if (u.pathname === '/tr') {   // translation proxy: the phones only ever talk to this server (works from China too)
+    const q = String(u.searchParams.get('q') || '').slice(0, 600), tl = /^(en|zh-CN|tr)$/.test(u.searchParams.get('tl')) ? u.searchParams.get('tl') : 'en';
+    translate(q, tl).then(t => { res.writeHead(t ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ t })); }); return;
+  }
   if (u.pathname === '/stats') {
     if (PEEK_KEY && u.searchParams.get('key') !== PEEK_KEY) { res.writeHead(403); return res.end('nope'); }
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify(stats));
@@ -94,6 +98,23 @@ function addBook(ws, e) {
   const a = books.get(ws.room) || []; if (!e.u || a.some(x => x.u === e.u)) return null;
   a.push(e); a.sort((x, y) => x.at - y.at); while (a.length > 600) a.shift(); books.set(ws.room, a); return e;
 }
+const trCache = new Map();
+async function translate(q, tl) {
+  if (!q.trim()) return '';
+  const key = tl + '|' + q; if (trCache.has(key)) return trCache.get(key);
+  let t = '';
+  try {   // 1) Google's public translate endpoint
+    const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&dt=t&tl=' + tl + '&q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(6000) });
+    const j = await r.json(); t = (j[0] || []).map(x => x[0]).join('');
+  } catch (e) { }
+  if (!t) try {   // 2) MyMemory as a fallback
+    const sl = /[\u3400-\u9fff]/.test(q) ? 'zh-CN' : 'en'; if (sl === tl) return q;
+    const r = await fetch('https://api.mymemory.translated.net/get?langpair=' + sl + '|' + tl + '&q=' + encodeURIComponent(q), { signal: AbortSignal.timeout(6000) });
+    const j = await r.json(); t = (j.responseData && j.responseData.translatedText) || '';
+  } catch (e) { }
+  if (t) { trCache.set(key, t); if (trCache.size > 2000) trCache.delete(trCache.keys().next().value); }
+  return t;
+}
 async function upSet(key, val) { if (UP_URL) try { await fetch(UP_URL + '/set/' + key, { method: 'POST', headers: { Authorization: 'Bearer ' + UP_TOK }, body: val }); } catch (e) { console.log('photo save failed', e.message); } }
 async function upGet(key) { if (!UP_URL) return null; try { const j = await (await fetch(UP_URL + '/get/' + key, { headers: { Authorization: 'Bearer ' + UP_TOK } })).json(); return j.result || null; } catch (e) { return null; } }
 const DAY_MS = 12 * 60 * 1000;
@@ -122,7 +143,7 @@ wss.on('connection', ws => {
     if (!ws.room) return;
     if (m.t === 'clock') { const c = { h0: ((+m.h % 24) + 24) % 24, t0: Date.now(), dayMs: DAY_MS }; clocks.set(ws.room, c); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'clock', clock: c }); return; }
     if (m.t === 'lantern' && m.l) {
-      const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() };
+      const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() }; if (m.l.w) l.w = String(m.l.w).slice(0, 140);
       const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a); saveAll();
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
     }
