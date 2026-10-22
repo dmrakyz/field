@@ -13,7 +13,7 @@ try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { }
 // ---- persistence: free Upstash Redis (survives Render restarts). Without the env vars → local file only.
 const UP_URL = process.env.UPSTASH_REDIS_REST_URL, UP_TOK = process.env.UPSTASH_REDIS_REST_TOKEN, KEY = 'huajian_state';
 let saveT = null;
-const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets) });
+const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets), bottles: Object.fromEntries(bottles) });
 const saveAll = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
   const body = snapshot();
   fs.writeFile(STATS_FILE, JSON.stringify(stats), () => { });
@@ -30,6 +30,7 @@ async function loadAll() {
     for (const [k, v] of Object.entries(d.chats || {})) chats.set(k, v);
     for (const [k, v] of Object.entries(d.lanterns || {})) lanterns.set(k, v);
     for (const [k, v] of Object.entries(d.blankets || {})) blankets.set(k, v);
+    for (const [k, v] of Object.entries(d.bottles || {})) bottles.set(k, v);
     console.log('restored garden from Upstash');
   } catch (e) { console.log('load failed', e.message); }
 }
@@ -60,6 +61,7 @@ const clocks = new Map(); // room -> { h0, t0 }  official time of day
 const chats = new Map();  // room -> last 50 messages
 const lanterns = new Map(); // room -> lanterns in the sky (kept up to 200)
 const blankets = new Map(); // room -> picnic blanket or null
+const bottles = new Map();  // room -> messages in bottles
 const DAY_MS = 12 * 60 * 1000;
 const clockOf = room => { if (!clocks.has(room)) clocks.set(room, { h0: 18.85, t0: Date.now(), dayMs: DAY_MS }); return clocks.get(room); };
 const send = (ws, m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
@@ -75,7 +77,7 @@ wss.on('connection', ws => {
       ws.room = String(m.room || 'garden').slice(0, 40); ws.name = String(m.name || '?').slice(0, 30); ws.who = m.who;
       if (!rooms.has(ws.room)) rooms.set(ws.room, new Set());
       const r = rooms.get(ws.room); r.add(ws);
-      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
+      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
       if (r.size === 1) ws.host = true;
       others(ws, { t: 'join', id: ws.id, name: ws.name, who: ws.who });
       return;
@@ -89,6 +91,13 @@ wss.on('connection', ws => {
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
     }
     if (m.t === 'blanket') { const b = m.b ? { x: +m.b.x, y: +m.b.y, z: +m.b.z, yaw: +m.b.yaw, who: String(m.b.who || '') } : null; blankets.set(ws.room, b); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'blanket', b }); return; }
+    if (m.t === 'bottle') {
+      const b = { id: Date.now() % 1e9 + Math.floor(Math.random() * 1000), name: ws.name, who: ws.who, txt: String(m.txt || '').slice(0, 400), at: Date.now(), read: false };
+      if (!b.txt.trim()) return;
+      const a = bottles.get(ws.room) || []; a.push(b); while (a.length > 60) a.shift(); bottles.set(ws.room, a); saveAll();
+      return others(ws, { t: 'ev', e: 'bottle', b });
+    }
+    if (m.t === 'bottleRead') { const a = bottles.get(ws.room) || []; const b = a.find(x => x.id === m.id); if (b && b.who !== ws.who) { b.read = true; saveAll(); } return; }
     if (m.t === 'chat') {
       const msg = { t: 'chat', id: ws.id, name: ws.name, who: ws.who, txt: String(m.txt || '').slice(0, 300), at: Date.now() };
       if (!msg.txt.trim()) return;
