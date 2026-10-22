@@ -13,7 +13,7 @@ try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { }
 // ---- persistence: free Upstash Redis (survives Render restarts). Without the env vars → local file only.
 const UP_URL = process.env.UPSTASH_REDIS_REST_URL, UP_TOK = process.env.UPSTASH_REDIS_REST_TOKEN, KEY = 'huajian_state';
 let saveT = null;
-const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets), bottles: Object.fromEntries(bottles) });
+const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets), bottles: Object.fromEntries(bottles), books: Object.fromEntries(books) });
 const saveAll = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
   const body = snapshot();
   fs.writeFile(STATS_FILE, JSON.stringify(stats), () => { });
@@ -31,6 +31,7 @@ async function loadAll() {
     for (const [k, v] of Object.entries(d.lanterns || {})) lanterns.set(k, v);
     for (const [k, v] of Object.entries(d.blankets || {})) blankets.set(k, v);
     for (const [k, v] of Object.entries(d.bottles || {})) bottles.set(k, v);
+    for (const [k, v] of Object.entries(d.books || {})) books.set(k, v);
     console.log('restored garden from Upstash');
   } catch (e) { console.log('load failed', e.message); }
 }
@@ -38,6 +39,23 @@ async function loadAll() {
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   if (u.pathname === '/health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end('{"ok":true,"mp":1}'); }
+  if (u.pathname === '/photo' && req.method === 'POST') {          // album photos: too big for the websocket, kept under their own key
+    let body = ''; req.on('data', d => { body += d; if (body.length > 900000) req.destroy(); });
+    req.on('end', async () => {
+      if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(body)) { res.writeHead(400); return res.end('bad'); }
+      const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+      photos.set(id, body); await upSet('huajian_photo_' + id, body);
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ id }));
+    }); return;
+  }
+  if (u.pathname.startsWith('/photo/')) {
+    const id = u.pathname.slice(7).replace(/[^a-z0-9]/g, '');
+    (async () => {
+      let d = photos.get(id); if (!d) { d = await upGet('huajian_photo_' + id); if (d) photos.set(id, d); }
+      if (!d) { res.writeHead(404); return res.end('gone'); }
+      res.writeHead(200, { 'content-type': 'image/jpeg', 'cache-control': 'public, max-age=31536000, immutable' }); res.end(Buffer.from(d.split(',')[1], 'base64'));
+    })(); return;
+  }
   if (u.pathname === '/stats') {
     if (PEEK_KEY && u.searchParams.get('key') !== PEEK_KEY) { res.writeHead(403); return res.end('nope'); }
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify(stats));
@@ -64,6 +82,20 @@ const chats = new Map();  // room -> last 50 messages
 const lanterns = new Map(); // room -> lanterns in the sky (kept up to 200)
 const blankets = new Map(); // room -> picnic blanket or null
 const bottles = new Map();  // room -> messages in bottles
+const books = new Map();    // room -> shared memory book entries (photos live under their own keys)
+const photos = new Map();   // id -> data URL (cache; Upstash is the real store)
+const cleanItem = it => { if (!it || typeof it !== 'object') return undefined; const o = { k: String(it.k || '').slice(0, 10) };
+  if (Number.isFinite(+it.sp)) o.sp = +it.sp; if (it.card) o.card = String(it.card).slice(0, 300);
+  if (Array.isArray(it.fl)) o.fl = it.fl.slice(0, 24).map(f => ({ sp: +f.sp || 0, c: String(f.c || '').slice(0, 9) })); return o; };
+const cleanEntry = (e, ws) => ({ u: String(e.u || '').slice(0, 64), k: String(e.k || '').slice(0, 30), c: String(e.c || 'moment').slice(0, 10),
+  who: ws.who, name: ws.name, to: e.to ? String(e.to).slice(0, 30) : undefined, txt: String(e.txt || '').slice(0, 500), w: e.w ? String(e.w).slice(0, 500) : undefined,
+  at: Math.min(Date.now(), +e.at || Date.now()), ph: e.ph ? String(e.ph).slice(0, 24) : undefined, it: cleanItem(e.it), v: Number.isFinite(+e.v) ? +e.v : undefined });
+function addBook(ws, e) {
+  const a = books.get(ws.room) || []; if (!e.u || a.some(x => x.u === e.u)) return null;
+  a.push(e); a.sort((x, y) => x.at - y.at); while (a.length > 600) a.shift(); books.set(ws.room, a); return e;
+}
+async function upSet(key, val) { if (UP_URL) try { await fetch(UP_URL + '/set/' + key, { method: 'POST', headers: { Authorization: 'Bearer ' + UP_TOK }, body: val }); } catch (e) { console.log('photo save failed', e.message); } }
+async function upGet(key) { if (!UP_URL) return null; try { const j = await (await fetch(UP_URL + '/get/' + key, { headers: { Authorization: 'Bearer ' + UP_TOK } })).json(); return j.result || null; } catch (e) { return null; } }
 const DAY_MS = 12 * 60 * 1000;
 const clockOf = room => { if (!clocks.has(room)) clocks.set(room, { h0: 18.85, t0: Date.now(), dayMs: DAY_MS }); return clocks.get(room); };
 const send = (ws, m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
@@ -78,8 +110,10 @@ wss.on('connection', ws => {
     if (m.t === 'hello') {
       ws.room = String(m.room || 'garden').slice(0, 40); ws.name = String(m.name || '?').slice(0, 30); ws.who = m.who;
       if (!rooms.has(ws.room)) rooms.set(ws.room, new Set());
-      const r = rooms.get(ws.room); r.add(ws);
-      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
+      const r = rooms.get(ws.room);
+      for (const o of [...r]) if (o.who && o.who === ws.who) { send(o, { t: 'kicked' }); r.delete(o); others(o, { t: 'leave', id: o.id }); o.room = null; try { o.close(); } catch (e) { } }   // same person reconnected → old one is a ghost
+      r.add(ws);
+      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), book: books.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
       if (r.size === 1) ws.host = true;
       others(ws, { t: 'join', id: ws.id, name: ws.name, who: ws.who });
       return;
@@ -99,6 +133,12 @@ wss.on('connection', ws => {
       const a = bottles.get(ws.room) || []; a.push(b); while (a.length > 60) a.shift(); bottles.set(ws.room, a); saveAll();
       return others(ws, { t: 'ev', e: 'bottle', b });
     }
+    if (m.t === 'book') {
+      const list = (Array.isArray(m.es) ? m.es : [m.e]).slice(0, 120).filter(Boolean), added = [];
+      for (const e of list) { const x = addBook(ws, cleanEntry(e, ws)); if (x) added.push(x); }
+      if (added.length) { saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'book', es: added }); }
+      return;
+    }
     if (m.t === 'bottleRead') { const a = bottles.get(ws.room) || []; const b = a.find(x => x.id === m.id); if (b && b.who !== ws.who) { b.read = true; saveAll(); } return; }
     if (m.t === 'chat') {
       const msg = { t: 'chat', id: ws.id, name: ws.name, who: ws.who, txt: String(m.txt || '').slice(0, 300), at: Date.now() };
@@ -112,7 +152,7 @@ wss.on('connection', ws => {
     m.id = ws.id; others(ws, m);                                    // time / warp / event
   });
   ws.on('close', () => {
-    const r = rooms.get(ws.room); if (!r) return;
+    const r = rooms.get(ws.room); if (!r || !r.has(ws)) return;
     r.delete(ws); others(ws, { t: 'leave', id: ws.id });
     if (!r.size) rooms.delete(ws.room); else if (ws.host) pickHost(ws.room);
   });
