@@ -44,6 +44,8 @@ const server = http.createServer((req, res) => {
   }
   let p = decodeURIComponent(u.pathname); if (p === '/') p = '/index.html';
   if (!fs.existsSync(PUB)) {                         // flat upload (no public/ folder): only ever serve index.html
+    const APP = { '/manifest.webmanifest': 'application/manifest+json', '/icon-180.png': 'image/png', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png' };
+    if (APP[p]) return fs.readFile(path.join(__dirname, p.slice(1)), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } res.writeHead(200, { 'content-type': APP[p], 'cache-control': 'public, max-age=86400' }); res.end(data); });
     if (p !== '/index.html') { res.writeHead(404); return res.end('not found'); }
     return fs.readFile(path.join(__dirname, 'index.html'), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } res.writeHead(200, { 'content-type': TYPES['.html'] }); res.end(data); });
   }
