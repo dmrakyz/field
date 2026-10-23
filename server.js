@@ -144,7 +144,7 @@ async function tCleanOld() {   // tiles in the older format: free their space
 async function tIndex() { if (tIdx) return tIdx; tIdx = {}; tCleanOld(); try { const j = await upGet('huajian_tidx4'); if (j) tIdx = JSON.parse(j); } catch (e) { } return tIdx; }
 const tIdxSave = () => { clearTimeout(tIdxT); tIdxT = setTimeout(() => upSet('huajian_tidx4', JSON.stringify(tIdx)), 5000); };
 function tMem(key, buf) { TMEM.delete(key); TMEM.set(key, buf); while (TMEM.size > TMEM_MAX) TMEM.delete(TMEM.keys().next().value); }
-const tik = key => 'r5' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
+const tik = key => 'r7' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
 async function tilePut(key, buf) {
   key = tik(key);
   if (TMEM.has(key)) return; tMem(key, buf); if (!UP_URL) return;
