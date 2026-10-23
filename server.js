@@ -69,7 +69,7 @@ const server = http.createServer((req, res) => {
     const key = u.pathname.slice(6); if (!/^\d_-?\d{1,7}_-?\d{1,7}$/.test(key)) { res.writeHead(400); return res.end('bad'); }
     if (req.method === 'PUT') {
       const parts = []; let n = 0; req.on('data', d => { n += d.length; if (n > 2e6) req.destroy(); else parts.push(d); });
-      req.on('end', () => { const buf = Buffer.concat(parts); let ok = false; try { const raw = zlib.inflateSync(buf); ok = raw.length === 4 + 512 * 512 * 9 && raw.readUInt32LE(0) === 0x48554a33; } catch (e) { }
+      req.on('end', () => { const buf = Buffer.concat(parts); let ok = false; try { const raw = zlib.inflateSync(buf); ok = raw.length === 4 + 512 * 512 * 9 && (raw.readUInt32LE(0) === 0x48554a33 || raw.readUInt32LE(0) === 0x48554a34); } catch (e) { }
         if (!ok) { res.writeHead(400); return res.end('bad'); } tilePut(key, buf); res.writeHead(200); res.end('ok'); }); return;
     }
     tileGet(key).then(b => { if (!b) { res.writeHead(404, { 'cache-control': 'no-store' }); return res.end(); } res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable' }); res.end(b); }); return;
@@ -144,17 +144,20 @@ async function tCleanOld() {   // tiles in the older format: free their space
 async function tIndex() { if (tIdx) return tIdx; tIdx = {}; tCleanOld(); try { const j = await upGet('huajian_tidx4'); if (j) tIdx = JSON.parse(j); } catch (e) { } return tIdx; }
 const tIdxSave = () => { clearTimeout(tIdxT); tIdxT = setTimeout(() => upSet('huajian_tidx4', JSON.stringify(tIdx)), 5000); };
 function tMem(key, buf) { TMEM.delete(key); TMEM.set(key, buf); while (TMEM.size > TMEM_MAX) TMEM.delete(TMEM.keys().next().value); }
+const tik = key => /^[56]_/.test(key) ? 'r2' + key : key;   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
 async function tilePut(key, buf) {
+  key = tik(key);
   if (TMEM.has(key)) return; tMem(key, buf); if (!UP_URL) return;
   const idx = await tIndex(); if (idx[key]) return;
   const b64 = buf.toString('base64'), n = Math.ceil(b64.length / 480000);
   for (let q = 0; q < n; q++) await upSet('huajian_t4_' + key + '_' + q, b64.slice(q * 480000, (q + 1) * 480000));
   idx[key] = { n, s: b64.length, t: Date.now() };
   let tot = 0; for (const v of Object.values(idx)) tot += v.s;
-  while (tot > TBUDGET) { const [ok, ov] = Object.entries(idx).sort((a, b) => a[1].t - b[1].t)[0]; for (let q = 0; q < ov.n; q++) upDel('huajian_t_' + ok + '_' + q); tot -= ov.s; delete idx[ok]; }
+  while (tot > TBUDGET) { const [ok, ov] = Object.entries(idx).sort((a, b) => a[1].t - b[1].t)[0]; for (let q = 0; q < ov.n; q++) upDel('huajian_t4_' + ok + '_' + q); tot -= ov.s; delete idx[ok]; }
   tIdxSave();
 }
 async function tileGet(key) {
+  key = tik(key);
   const m = TMEM.get(key); if (m) { tMem(key, m); return m; }
   if (!UP_URL) return null; const idx = await tIndex(), e = idx[key]; if (!e) return null;
   let b64 = ''; for (let q = 0; q < e.n; q++) { const p = await upGet('huajian_t4_' + key + '_' + q); if (!p) return null; b64 += p; }
