@@ -66,7 +66,7 @@ const server = http.createServer((req, res) => {
     })(); return;
   }
   if (u.pathname.startsWith('/tile/')) {   // shared world tiles: computed once on any phone, then everyone downloads them
-    const key = u.pathname.slice(6); if (!/^\d_-?\d{1,7}_-?\d{1,7}$/.test(key)) { res.writeHead(400); return res.end('bad'); }
+    const key = u.pathname.slice(6); if (!/^(s-?\d{1,4}_-?\d{1,4}_\d{1,3}_)?\d_-?\d{1,7}_-?\d{1,7}$/.test(key))   /* ground tiles, and sky-island tiles (s<site>_<site>_<island>_ first) */ { res.writeHead(400); return res.end('bad'); }
     if (req.method === 'PUT') {
       const parts = []; let n = 0; req.on('data', d => { n += d.length; if (n > 3e6) req.destroy(); else parts.push(d); });
       req.on('end', () => { const buf = Buffer.concat(parts); let ok = false; try { const raw = zlib.inflateSync(buf); const mg = raw.readUInt32LE(0); ok = raw.length === 4 + 512 * 512 * 9 && (mg === 0x48554a33 || mg === 0x48554a34) || raw.length === 4 + 512 * 512 * 11 && mg === 0x48554a35; } catch (e) { }
@@ -144,7 +144,7 @@ async function tCleanOld() {   // tiles in the older format: free their space
 async function tIndex() { if (tIdx) return tIdx; tIdx = {}; tCleanOld(); try { const j = await upGet('huajian_tidx4'); if (j) tIdx = JSON.parse(j); } catch (e) { } return tIdx; }
 const tIdxSave = () => { clearTimeout(tIdxT); tIdxT = setTimeout(() => upSet('huajian_tidx4', JSON.stringify(tIdx)), 5000); };
 function tMem(key, buf) { TMEM.delete(key); TMEM.set(key, buf); while (TMEM.size > TMEM_MAX) TMEM.delete(TMEM.keys().next().value); }
-const tik = key => 'r13' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
+const tik = key => 'r19' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
 async function tilePut(key, buf) {
   key = tik(key);
   if (TMEM.has(key)) return; tMem(key, buf); if (!UP_URL) return;
