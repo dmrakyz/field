@@ -14,7 +14,7 @@ try { stats = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch (e) { }
 // ---- persistence: free Upstash Redis (survives Render restarts). Without the env vars → local file only.
 const UP_URL = process.env.UPSTASH_REDIS_REST_URL, UP_TOK = process.env.UPSTASH_REDIS_REST_TOKEN, KEY = 'huajian_state';
 let saveT = null;
-const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blankets: Object.fromEntries(blankets), bottles: Object.fromEntries(bottles), books: Object.fromEntries(books) });
+const snapshot = () => JSON.stringify({ stats, clocks: Object.fromEntries(clocks), chats: Object.fromEntries(chats), lanterns: Object.fromEntries(lanterns), blooms: Object.fromEntries(blooms), blankets: Object.fromEntries(blankets), bottles: Object.fromEntries(bottles), books: Object.fromEntries(books) });
 const saveAll = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
   const body = snapshot();
   fs.writeFile(STATS_FILE, JSON.stringify(stats), () => { });
@@ -30,6 +30,7 @@ async function loadAll() {
     for (const [k, v] of Object.entries(d.clocks || {})) clocks.set(k, v);
     for (const [k, v] of Object.entries(d.chats || {})) chats.set(k, v);
     for (const [k, v] of Object.entries(d.lanterns || {})) lanterns.set(k, v);
+    for (const [k, v] of Object.entries(d.blooms || {})) blooms.set(k, v);
     for (const [k, v] of Object.entries(d.blankets || {})) blankets.set(k, v);
     for (const [k, v] of Object.entries(d.bottles || {})) bottles.set(k, v);
     for (const [k, v] of Object.entries(d.books || {})) books.set(k, v);
@@ -104,6 +105,7 @@ const rooms = new Map(); // room -> Set<ws>
 const clocks = new Map(); // room -> { h0, t0 }  official time of day
 const chats = new Map();  // room -> last 50 messages
 const lanterns = new Map(); // room -> lanterns in the sky (kept up to 200)
+const blooms = new Map();   // world room -> flower patches from seed bombs (kept up to 400)
 const blankets = new Map(); // room -> picnic blanket or null
 const bottles = new Map();  // room -> messages in bottles
 const books = new Map();    // room -> shared memory book entries (photos live under their own keys)
@@ -182,7 +184,7 @@ wss.on('connection', ws => {
       const r = rooms.get(ws.room);
       for (const o of [...r]) if (o.who && o.who === ws.who) { send(o, { t: 'kicked' }); r.delete(o); others(o, { t: 'leave', id: o.id }); o.room = null; try { o.close(); } catch (e) { } }   // same person reconnected → old one is a ghost
       r.add(ws);
-      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), book: books.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
+      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blooms: blooms.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), book: books.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
       if (r.size === 1) ws.host = true;
       others(ws, { t: 'join', id: ws.id, name: ws.name, who: ws.who });
       return;
@@ -194,6 +196,12 @@ wss.on('connection', ws => {
       const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() }; if (m.l.w) l.w = String(m.l.w).slice(0, 140);
       const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a); saveAll();
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
+    }
+    if (m.t === 'bloom' && m.b) {
+      const b = { x: +m.b.x || 0, y: +m.b.y || 0, z: +m.b.z || 0, k: (+m.b.k | 0) % 6, s: +m.b.s >>> 0, who: ws.who, at: Date.now() };
+      if (![b.x, b.y, b.z].every(Number.isFinite)) return;
+      const a = blooms.get(ws.room) || []; a.push(b); while (a.length > 400) a.shift(); blooms.set(ws.room, a); saveAll();
+      const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'bloom', b }); return;
     }
     if (m.t === 'blanket') { const b = m.b ? { x: +m.b.x, y: +m.b.y, z: +m.b.z, yaw: +m.b.yaw, who: String(m.b.who || '') } : null; blankets.set(ws.room, b); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'blanket', b }); return; }
     if (m.t === 'bottle') {
