@@ -174,8 +174,14 @@ const tik = key => 'r25' + key;   // exact-arithmetic world (every device comput
 const PACK = new Map();
 try { for (const f of fs.readdirSync(__dirname)) { if (!/^tiles-.*\.bin$/.test(f)) continue; const fd = fs.openSync(path.join(__dirname, f), 'r'), lb = Buffer.alloc(4); fs.readSync(fd, lb, 0, 4, 0); const hl = lb.readUInt32LE(0), hb = Buffer.alloc(hl); fs.readSync(fd, hb, 0, hl, 4);
   const H = JSON.parse(hb.toString()); if (H.v !== 'r25') { console.log('tile pack', f, 'is from another world version: skipped'); continue; } let off = 4 + hl; for (const t of H.tiles || H) { PACK.set(t.L + '_' + t.i + '_' + t.j, { fd, off, n: t.n }); off += t.n; } console.log('tile pack', f, (H.tiles || H).length); } } catch (e) { console.log('tile packs:', e.message); }
+/* seed0.bin: the animals and grown plants around the spawn, designed in advance (so nobody's first minutes go into
+   designing them): same layout, keyed by their store keys */
+const SEED = new Map();
+try { const b = fs.readFileSync(path.join(__dirname, 'seed0.bin')), hl = b.readUInt32LE(0), H = JSON.parse(b.slice(4, 4 + hl).toString()); let off = 4 + hl; for (const [k, n] of H.items) { SEED.set(k, b.slice(off, off + n)); off += n; } console.log('seed0:', SEED.size, 'designs'); } catch (e) { }
+const SEED_DUMP = process.env.SEED_DUMP;   // (building seed0.bin: every design put here is also written out)
 function packGet(key) { const p = PACK.get(key); if (!p) return null; const b = Buffer.alloc(p.n); fs.readSync(p.fd, b, 0, p.n, p.off); return b; }
 async function tilePut(key, buf) {
+  if (SEED_DUMP && /^[AP]/.test(key)) fs.writeFile(path.join(SEED_DUMP, key), buf, () => { });
   key = tik(key);
   if (TMEM.has(key)) return; tMem(key, buf); if (!UP_URL) return;
   const idx = await tIndex(); if (idx[key]) return;
@@ -187,6 +193,7 @@ async function tilePut(key, buf) {
   tIdxSave();
 }
 async function tileGet(key) {
+  const sd = SEED.get(key); if (sd) return sd;
   key = tik(key);
   const m = TMEM.get(key); if (m) { tMem(key, m); return m; }
   if (!UP_URL) return null; const idx = await tIndex(), e = idx[key]; if (!e) return null;
