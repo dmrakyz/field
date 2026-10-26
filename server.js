@@ -97,6 +97,10 @@ const server = http.createServer((req, res) => {
     const q = String(u.searchParams.get('q') || '').slice(0, 600), tl = /^(en|zh-CN|tr)$/.test(u.searchParams.get('tl')) ? u.searchParams.get('tl') : 'en';
     translate(q, tl).then(t => { res.writeHead(t ? 200 : 502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ t })); }); return;
   }
+  if (u.pathname === '/rooms') {   // the lobby's list: open world rooms only (private 'p-' codes never show)
+    const out = []; for (const [k, r] of rooms) { if (!k.startsWith('w:') || k.startsWith('w:p-') || !r.size) continue; out.push({ room: k.slice(2), n: r.size, names: [...r].slice(0, 6).map(o => o.name) }); }
+    out.sort((a, b) => b.n - a.n); res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify(out.slice(0, 30)));
+  }
   if (u.pathname === '/stats') {
     if (PEEK_KEY && u.searchParams.get('key') !== PEEK_KEY) { res.writeHead(403); return res.end('nope'); }
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify(stats));
@@ -164,12 +168,12 @@ async function tCleanOld() {   // tiles in the older format: free their space
 async function tIndex() { if (tIdx) return tIdx; tIdx = {}; tCleanOld(); try { const j = await upGet('huajian_tidx4'); if (j) tIdx = JSON.parse(j); } catch (e) { } return tIdx; }
 const tIdxSave = () => { clearTimeout(tIdxT); tIdxT = setTimeout(() => upSet('huajian_tidx4', JSON.stringify(tIdx)), 5000); };
 function tMem(key, buf) { TMEM.delete(key); TMEM.set(key, buf); while (TMEM.size > TMEM_MAX) TMEM.delete(TMEM.keys().next().value); }
-const tik = key => 'r24' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
+const tik = key => 'r25' + key;   // exact-arithmetic world (every device computes the same bits): no older copies are reused   // the 2 m level changed (soil and bedrock) and 0.5 m is new: their old copies are not reused
 /* tile packs: files of prebuilt tiles shipped with the site (tiles-*.bin, same layout as world0.bin), served before any
    phone has to compute them */
 const PACK = new Map();
 try { for (const f of fs.readdirSync(__dirname)) { if (!/^tiles-.*\.bin$/.test(f)) continue; const fd = fs.openSync(path.join(__dirname, f), 'r'), lb = Buffer.alloc(4); fs.readSync(fd, lb, 0, 4, 0); const hl = lb.readUInt32LE(0), hb = Buffer.alloc(hl); fs.readSync(fd, hb, 0, hl, 4);
-  const H = JSON.parse(hb.toString()); if (H.v !== 'r24') { console.log('tile pack', f, 'is from another world version: skipped'); continue; } let off = 4 + hl; for (const t of H.tiles || H) { PACK.set(t.L + '_' + t.i + '_' + t.j, { fd, off, n: t.n }); off += t.n; } console.log('tile pack', f, (H.tiles || H).length); } } catch (e) { console.log('tile packs:', e.message); }
+  const H = JSON.parse(hb.toString()); if (H.v !== 'r25') { console.log('tile pack', f, 'is from another world version: skipped'); continue; } let off = 4 + hl; for (const t of H.tiles || H) { PACK.set(t.L + '_' + t.i + '_' + t.j, { fd, off, n: t.n }); off += t.n; } console.log('tile pack', f, (H.tiles || H).length); } } catch (e) { console.log('tile packs:', e.message); }
 function packGet(key) { const p = PACK.get(key); if (!p) return null; const b = Buffer.alloc(p.n); fs.readSync(p.fd, b, 0, p.n, p.off); return b; }
 async function tilePut(key, buf) {
   key = tik(key);
@@ -215,6 +219,7 @@ wss.on('connection', ws => {
     }
     if (m.t === 'ping') return send(ws, { t: 'pong', c: m.c, s: Date.now() });
     if (!ws.room) return;
+    if (m.t === 'rename') { ws.name = String(m.name || '?').slice(0, 30); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'rename', id: ws.id, name: ws.name }); return; }
     if (m.t === 'clock') { const c = { h0: ((+m.h % 24) + 24) % 24, t0: Date.now(), dayMs: DAY_MS }; clocks.set(ws.room, c); saveAll(); const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'clock', clock: c }); return; }
     if (m.t === 'lantern' && m.l) {
       const l = { x: +m.l.x || 0, y: +m.l.y || 0, z: +m.l.z || 0, who: String(m.l.who || ''), name: ws.name, at: Date.now() }; if (m.l.w) l.w = String(m.l.w).slice(0, 140);
