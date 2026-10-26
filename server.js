@@ -181,7 +181,7 @@ try { const b = fs.readFileSync(path.join(__dirname, 'seed0.bin')), hl = b.readU
 const SEED_DUMP = process.env.SEED_DUMP;   // (building seed0.bin: every design put here is also written out)
 function packGet(key) { const p = PACK.get(key); if (!p) return null; const b = Buffer.alloc(p.n); fs.readSync(p.fd, b, 0, p.n, p.off); return b; }
 async function tilePut(key, buf) {
-  if (SEED_DUMP && /^[AP]/.test(key)) fs.writeFile(path.join(SEED_DUMP, key), buf, () => { });
+  if (SEED_DUMP && /^([AP]|s-?\d)/.test(key)) fs.writeFile(path.join(SEED_DUMP, key), buf, () => { });
   key = tik(key);
   if (TMEM.has(key)) return; tMem(key, buf); if (!UP_URL) return;
   const idx = await tIndex(); if (idx[key]) return;
