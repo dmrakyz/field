@@ -85,7 +85,7 @@ const server = http.createServer((req, res) => {
     tileGet('A' + key).then(b => { if (!b) { res.writeHead(404, { 'cache-control': 'no-store' }); return res.end(); } res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable' }); res.end(b); }); return;
   }
   if (u.pathname.startsWith('/tile/')) {   // shared world tiles: computed once on any phone, then everyone downloads them
-    const key = u.pathname.slice(6); if (!/^(s-?\d{1,4}_-?\d{1,4}_\d{1,3}_)?\d_-?\d{1,7}_-?\d{1,7}$/.test(key))   /* ground tiles, and sky-island tiles (s<site>_<site>_<island>_ first) */ { res.writeHead(400); return res.end('bad'); }
+    const key = u.pathname.slice(6); if (!/^(s-?\d{1,4}_-?\d{1,4}_\d{1,3}b?_)?\d_-?\d{1,7}_-?\d{1,7}$/.test(key))   /* ground tiles, and sky-island tiles (s<site>_<site>_<island>_ first) */ { res.writeHead(400); return res.end('bad'); }
     if (req.method === 'PUT') {
       const parts = []; let n = 0; req.on('data', d => { n += d.length; if (n > 3e6) req.destroy(); else parts.push(d); });
       req.on('end', () => { const buf = Buffer.concat(parts); let ok = false; try { const raw = zlib.inflateSync(buf); const mg = raw.readUInt32LE(0); ok = raw.length === 4 + 512 * 512 * 9 && (mg === 0x48554a33 || mg === 0x48554a34) || raw.length === 4 + 512 * 512 * 11 && mg === 0x48554a35; } catch (e) { }
