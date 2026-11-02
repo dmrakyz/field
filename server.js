@@ -109,6 +109,7 @@ const server = http.createServer((req, res) => {
   let p = decodeURIComponent(u.pathname); if (p === '/') p = '/index.html';
   if (!fs.existsSync(PUB)) {                         // flat upload (no public/ folder): only ever serve index.html
     if (p === '/world0.bin') return fs.readFile(path.join(__dirname, 'world0.bin'), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, 'world0', data, 'application/octet-stream'); });
+    { const m = /^\/pack1-([0-5])\.bin$/.exec(p); if (m) { const b = facePack(+m[1]); if (!b) { res.writeHead(404); return res.end('not found'); } res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': b.length, 'cache-control': 'public, max-age=3600' }); return res.end(b); } }   // one face of the baked planet (~5 MB, not the whole 30)
     if (p === '/planet0.bin' || p === '/planet1.bin' || p === '/globe.html') { const nm = p.slice(1); return fs.readFile(path.join(__dirname, nm), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, nm.split('.')[0], data, nm.endsWith('.html') ? TYPES['.html'] : 'application/octet-stream'); }); }   // the globe (in the works) and its baked planet
     if (p === '/terrain.html') return fs.readFile(path.join(__dirname, 'terrain.html'), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, 'terrain', data, TYPES['.html']); });
     const APP = { '/manifest.webmanifest': 'application/manifest+json', '/icon-180.png': 'image/png', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png' };
@@ -125,6 +126,16 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
+/* planet1.bin split by face, once, on first ask: [u32 header length][header JSON, only that face's tiles][their bytes] */
+const FPACK = new Map();
+function facePack(f) {
+  if (FPACK.has(f)) return FPACK.get(f);
+  try { const b = fs.readFileSync(path.join(__dirname, 'planet1.bin')), hl = b.readUInt32LE(0), H = JSON.parse(b.slice(4, 4 + hl).toString()); let off = 4 + hl; const parts = [[], [], [], [], [], []], tl = [[], [], [], [], [], []];
+    for (const t of H.tiles) { parts[t.f].push(b.slice(off, off + t.n)); tl[t.f].push(t); off += t.n; }
+    for (let k = 0; k < 6; k++) { const hj = Buffer.from(JSON.stringify({ ...H, tiles: tl[k] })), lb = Buffer.alloc(4); lb.writeUInt32LE(hj.length, 0); FPACK.set(k, Buffer.concat([lb, hj, ...parts[k]])); }
+  } catch (e) { console.log('planet pack', e.message); return null; }
+  return FPACK.get(f);
+}
 const rooms = new Map(); // room -> Set<ws>
 const clocks = new Map(); // room -> { h0, t0 }  official time of day
 const chats = new Map();  // room -> last 50 messages
@@ -133,6 +144,13 @@ const blooms = new Map();   // world room -> flower patches from seed bombs (kep
 const blankets = new Map(); // room -> picnic blanket or null
 const bottles = new Map();  // room -> messages in bottles
 const books = new Map();    // room -> shared memory book entries (photos live under their own keys)
+const edits = new Map();    // room -> what people did to the ground and its plants (digs, fills, picks), in order (kept up to 20000)
+const EKEY = 'huajian_edits'; let edSaveT = null;
+const saveEdits = () => { clearTimeout(edSaveT); edSaveT = setTimeout(async () => { if (UP_URL) try { await fetch(UP_URL + '/set/' + EKEY, { method: 'POST', headers: { Authorization: 'Bearer ' + UP_TOK }, body: JSON.stringify(Object.fromEntries(edits)) }); } catch (e) { console.log('edits save failed', e.message); } }, 4000); };
+async function loadEdits() { if (!UP_URL) return; try { const r = await fetch(UP_URL + '/get/' + EKEY, { headers: { Authorization: 'Bearer ' + UP_TOK } }); const j = await r.json(); if (j.result) for (const [k, v] of Object.entries(JSON.parse(j.result))) edits.set(k, v); } catch (e) { console.log('edits load failed', e.message); } }
+const cleanEdit = e => { if (!e || typeof e !== 'object' || !/^[dfhp]$/.test(e.k)) return null; const o = { k: e.k, fr: String(e.fr || '').slice(0, 16) };
+  for (const f of ['x', 'y', 'z', 'r', 'w', 'h', 'l', 'yaw']) if (e[f] !== undefined) { const v = +e[f]; if (!Number.isFinite(v)) return null; o[f] = Math.round(v * 1000) / 1000; }
+  if (e.pid !== undefined) o.pid = String(e.pid).slice(0, 40); if (e.m !== undefined) o.m = String(e.m).slice(0, 40); if (e.id !== undefined) o.id = String(e.id).slice(0, 24); if (e.del) o.del = 1; return o; };
 const photos = new Map();   // id -> data URL (cache; Upstash is the real store)
 const cleanItem = it => { if (!it || typeof it !== 'object') return undefined; const o = { k: String(it.k || '').slice(0, 10) };
   if (Number.isFinite(+it.sp)) o.sp = +it.sp; if (it.card) o.card = String(it.card).slice(0, 300);
@@ -221,7 +239,7 @@ wss.on('connection', ws => {
       const r = rooms.get(ws.room);
       for (const o of [...r]) if (o.who && o.who === ws.who) { send(o, { t: 'kicked' }); r.delete(o); others(o, { t: 'leave', id: o.id }); o.room = null; try { o.close(); } catch (e) { } }   // same person reconnected → old one is a ghost
       r.add(ws);
-      send(ws, { t: 'welcome', clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blooms: blooms.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), book: books.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
+      send(ws, { t: 'welcome', edits: edits.get(ws.room) || [], clock: clockOf(ws.room), chat: chats.get(ws.room) || [], lanterns: lanterns.get(ws.room) || [], blooms: blooms.get(ws.room) || [], blanket: blankets.get(ws.room) || null, bottles: (bottles.get(ws.room) || []).filter(b => !b.read), book: books.get(ws.room) || [], now: Date.now(), id: ws.id, host: r.size === 1, peers: [...r].filter(o => o !== ws).map(o => ({ id: o.id, name: o.name, who: o.who, s: o.last })) });
       if (r.size === 1) ws.host = true;
       others(ws, { t: 'join', id: ws.id, name: ws.name, who: ws.who });
       return;
@@ -235,6 +253,7 @@ wss.on('connection', ws => {
       const a = lanterns.get(ws.room) || []; a.push(l); while (a.length > 200) a.shift(); lanterns.set(ws.room, a); saveAll();
       const r = rooms.get(ws.room); if (r) for (const o of r) send(o, { t: 'lantern', l }); return;
     }
+    if (m.t === 'ed') { const e = cleanEdit(m.e); if (!e) return; e.who = ws.who; const a = edits.get(ws.room) || []; a.push(e); while (a.length > 20000) a.shift(); edits.set(ws.room, a); saveEdits(); others(ws, { t: 'ed', e }); return; }
     if (m.t === 'bloom' && m.b) {
       const b = { x: +m.b.x || 0, y: +m.b.y || 0, z: +m.b.z || 0, k: (+m.b.k | 0) % 6, s: +m.b.s >>> 0, who: ws.who, at: Date.now() };
       if (![b.x, b.y, b.z].every(Number.isFinite)) return;
@@ -273,4 +292,4 @@ wss.on('connection', ws => {
   });
 });
 setInterval(() => { for (const ws of wss.clients) { if (!ws.alive) { ws.terminate(); continue; } ws.alive = false; ws.ping(); } }, 25000);
-loadAll().finally(() => server.listen(PORT, () => console.log('花间 listening on', PORT, UP_URL ? '(saving to Upstash)' : '(no Upstash: memory only)')));
+Promise.all([loadAll(), loadEdits()]).finally(() => server.listen(PORT, () => console.log('花间 listening on', PORT, UP_URL ? '(saving to Upstash)' : '(no Upstash: memory only)')));
