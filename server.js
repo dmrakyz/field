@@ -40,8 +40,9 @@ async function loadAll() {
 
 function sendZ(req, res, key, data, type) {
   const ae = String(req.headers['accept-encoding'] || ''); let z = ZCACHE.get(key);
-  if (!z || z.len !== data.length) { z = { len: data.length, br: zlib.brotliCompressSync(data, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 9 } }), gz: zlib.gzipSync(data, { level: 9 }) }; ZCACHE.set(key, z); }
-  const h = { 'content-type': type, vary: 'Accept-Encoding', 'cache-control': 'no-cache' };
+  if (!z || z.len !== data.length || (data.length < 4e6 && !data.equals(z.raw))) { z = { len: data.length, raw: data.length < 4e6 ? data : null, etag: '"' + require('crypto').createHash('sha1').update(data).digest('base64').slice(0, 20) + '"', br: zlib.brotliCompressSync(data, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 9 } }), gz: zlib.gzipSync(data, { level: 9 }) }; ZCACHE.set(key, z); }
+  const h = { 'content-type': type, vary: 'Accept-Encoding', 'cache-control': 'no-cache', etag: z.etag };   // (no-cache + etag: the browser asks, and gets a 304 when nothing changed — a face crossing doesn't fetch the 30 MB planet again)
+  if (req.headers['if-none-match'] === z.etag) { res.writeHead(304, h); return res.end(); }
   if (/\bbr\b/.test(ae)) { h['content-encoding'] = 'br'; res.writeHead(200, h); return res.end(z.br); }
   if (/gzip/.test(ae)) { h['content-encoding'] = 'gzip'; res.writeHead(200, h); return res.end(z.gz); }
   res.writeHead(200, h); res.end(data);
@@ -85,7 +86,7 @@ const server = http.createServer((req, res) => {
     tileGet('A' + key).then(b => { if (!b) { res.writeHead(404, { 'cache-control': 'no-store' }); return res.end(); } res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable' }); res.end(b); }); return;
   }
   if (u.pathname.startsWith('/tile/')) {   // shared world tiles: computed once on any phone, then everyone downloads them
-    const key = u.pathname.slice(6); if (!/^(s-?\d{1,4}_-?\d{1,4}_\d{1,3}[b-e]?_)?\d_-?\d{1,7}_-?\d{1,7}$/.test(key))   /* ground tiles, and sky-island tiles (s<site>_<site>_<island>_ first) */ { res.writeHead(400); return res.end('bad'); }
+    const key = u.pathname.slice(6); if (!/^([f-k][0-5]_)?(s-?\d{1,4}_-?\d{1,4}_\d{1,3}[b-e]?_)?\d_-?\d{1,7}_-?\d{1,7}$/.test(key))   /* ground tiles, and sky-island tiles (s<site>_<site>_<island>_ first) */ { res.writeHead(400); return res.end('bad'); }
     if (req.method === 'PUT') {
       const parts = []; let n = 0; req.on('data', d => { n += d.length; if (n > 3e6) req.destroy(); else parts.push(d); });
       req.on('end', () => { const buf = Buffer.concat(parts); let ok = false; try { const raw = zlib.inflateSync(buf); const mg = raw.readUInt32LE(0); ok = raw.length === 4 + 512 * 512 * 9 && (mg === 0x48554a33 || mg === 0x48554a34) || raw.length === 4 + 512 * 512 * 11 && mg === 0x48554a35; } catch (e) { }
@@ -108,6 +109,7 @@ const server = http.createServer((req, res) => {
   let p = decodeURIComponent(u.pathname); if (p === '/') p = '/index.html';
   if (!fs.existsSync(PUB)) {                         // flat upload (no public/ folder): only ever serve index.html
     if (p === '/world0.bin') return fs.readFile(path.join(__dirname, 'world0.bin'), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, 'world0', data, 'application/octet-stream'); });
+    if (p === '/planet0.bin' || p === '/planet1.bin' || p === '/globe.html') { const nm = p.slice(1); return fs.readFile(path.join(__dirname, nm), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, nm.split('.')[0], data, nm.endsWith('.html') ? TYPES['.html'] : 'application/octet-stream'); }); }   // the globe (in the works) and its baked planet
     if (p === '/terrain.html') return fs.readFile(path.join(__dirname, 'terrain.html'), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } return sendZ(req, res, 'terrain', data, TYPES['.html']); });
     const APP = { '/manifest.webmanifest': 'application/manifest+json', '/icon-180.png': 'image/png', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png' };
     if (APP[p]) return fs.readFile(path.join(__dirname, p.slice(1)), (err, data) => { if (err) { res.writeHead(404); return res.end('not found'); } res.writeHead(200, { 'content-type': APP[p], 'cache-control': 'public, max-age=86400' }); res.end(data); });
